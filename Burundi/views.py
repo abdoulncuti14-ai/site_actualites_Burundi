@@ -1,28 +1,60 @@
+
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.contrib import messages
 from django.contrib.auth.models import User
-from .models import Article, Commentaire, MyTokenObtainPairSerializer
-from .serializers import ArticleSerializer, CommentaireSerializer, UserSerializer
-from rest_framework import viewsets, status
+
+from .models import Article, Commentaire
+from .serializers import (
+    ArticleSerializer, CommentaireSerializer,
+    UserSerializer, MyTokenObtainPairSerializer
+)
+
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticatedOrReadOnly, IsAdminUser
+from rest_framework.permissions import (
+    AllowAny, IsAuthenticatedOrReadOnly,
+    IsAdminUser, IsAuthenticated
+)
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.authentication import JWTAuthentication
+
+
+
+class IsAuthorOrAdmin(permissions.BasePermission):
+    
+    def has_object_permission(self, request, view, obj):
+        
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        
+        if hasattr(obj, 'auteur'):
+            return obj.auteur == request.user or request.user.is_staff
+        return request.user.is_staff
+
 
 
 
 class MyTokenObtainPairView(TokenObtainPairView):
     serializer_class = MyTokenObtainPairSerializer
 
+
+
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAuthenticated]  
+
+    def get_queryset(self):
+        """Un admin voit tous les users. Un user normal ne voit que lui-même."""
+        if self.request.user.is_staff:
+            return User.objects.all()
+        return User.objects.filter(id=self.request.user.id)
+
+
 
 class ArticleViewSet(viewsets.ModelViewSet):
     queryset = Article.objects.all().order_by('-date_published')
@@ -32,27 +64,66 @@ class ArticleViewSet(viewsets.ModelViewSet):
         'titre': ['icontains'],
         'date_published': ['gte', 'lte'],
     }
-    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_permissions(self):
+        
+        if self.action in ['list', 'retrieve']:
+            return [AllowAny()]
+        elif self.action == 'create':
+            return [IsAuthenticated()]
+        else:
+            return [IsAuthorOrAdmin()]
+
+    def perform_create(self, serializer):
+        
+        serializer.save(auteur=self.request.user)
+
+
 
 class CommentaireViewSet(viewsets.ModelViewSet):
     queryset = Commentaire.objects.all().order_by('-date_published')
     serializer_class = CommentaireSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['auteur', 'article']
-    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_permissions(self):
+        
+        if self.action in ['list', 'retrieve']:
+            return [AllowAny()]
+        elif self.action == 'create':
+            return [IsAuthenticated()]
+        else:
+            return [IsAuthorOrAdmin()]
+
+    def perform_create(self, serializer):
+        
+        serializer.save(auteur=self.request.user)
+
+
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def api_inscription(request):
+    username = request.data.get('username', '').strip()
+    password = request.data.get('password', '')
+    email = request.data.get('email', '').strip()
 
-    username = request.data.get('username')
-    password = request.data.get('password')
-    if username and password:
-        if User.objects.filter(username=username).exists():
-            return Response({"error": "Utilisateur déjà existant"}, status=400)
-        User.objects.create_user(username=username, password=password)
-        return Response({"message": "Compte créé !"}, status=201)
-    return Response({"error": "Données manquantes"}, status=400)
+    
+    if not username or not password:
+        return Response({"error": "Nom d'utilisateur et mot de passe obligatoires."}, status=400)
+
+    if len(password) < 6:
+        return Response({"error": "Le mot de passe doit contenir au moins 6 caractères."}, status=400)
+
+    if User.objects.filter(username=username).exists():
+        return Response({"error": "Ce nom d'utilisateur est déjà pris."}, status=400)
+
+    user = User.objects.create_user(username=username, password=password, email=email)
+    return Response({
+        "message": "Compte créé avec succès !",
+        "user_id": user.id,
+        "username": user.username
+    }, status=201)
 
 
 
@@ -67,16 +138,19 @@ def inscription(request):
         form = UserCreationForm()
     return render(request, 'inscription.html', {'form': form})
 
+
 @login_required
 def redirection_post_connexion(request):
     if request.user.is_superuser:
         return redirect('dashboard_superuser')
     return redirect('flux_actualites')
 
+
 @login_required
 def flux_actualites(request):
     articles = Article.objects.all().order_by('-date_published')
     return render(request, 'flux.html', {'articles': articles})
+
 
 @login_required
 def dashboard_superuser(request):
@@ -84,6 +158,7 @@ def dashboard_superuser(request):
         return redirect('flux_actualites')
     articles = Article.objects.all().order_by('-date_published')
     return render(request, 'dashboard.html', {'articles': articles})
+
 
 @login_required
 def supprimer_article(request, article_id):
